@@ -35,13 +35,13 @@ type sectionEntry struct {
 
 // sectionRegistry is the ordered list of Bloomberg RSS feed sections.
 var sectionRegistry = []sectionEntry{
-	{Slug: "top", Name: "Top Headlines", Path: "/news/headlines.rss"},
+	{Slug: "top", Name: "Top Headlines", Path: "/news.rss"},
 	{Slug: "markets", Name: "Markets", Path: "/markets/news.rss"},
 	{Slug: "technology", Name: "Technology", Path: "/technology/news.rss"},
 	{Slug: "politics", Name: "Politics", Path: "/politics/news.rss"},
-	{Slug: "business", Name: "Business", Path: "/business-week/news.rss"},
+	{Slug: "business", Name: "Business", Path: "/business/news.rss"},
 	{Slug: "economics", Name: "Economics", Path: "/economics/news.rss"},
-	{Slug: "personal-finance", Name: "Personal Finance", Path: "/personal-finance/news.rss"},
+	{Slug: "personal-finance", Name: "Personal Finance", Path: "/wealth/news.rss"},
 	{Slug: "crypto", Name: "Crypto", Path: "/crypto/news.rss"},
 }
 
