@@ -1,52 +1,152 @@
-// Package bloomberg is the library behind the bloom command line:
-// the HTTP client, request shaping, and the typed data models for bloomberg.
+// Package bloomberg is the library behind the bloom command: the HTTP client,
+// request shaping, and typed data models for Bloomberg public RSS feeds.
 //
-// The Client here is the spine every command shares. It sets a real
-// User-Agent, paces requests so a busy session stays polite, and retries the
-// transient failures (429 and 5xx) that any public site throws under load.
-// Build your endpoint calls and JSON decoding on top of it.
+// All Bloomberg feeds share one base URL; the section slug selects the path.
+// The client sets a real User-Agent, paces requests, and retries 429/5xx
+// with exponential back-off. No API key is required.
 package bloomberg
 
 import (
 	"context"
+	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 )
 
-// DefaultUserAgent identifies the client to bloomberg. A real, honest
-// User-Agent is both polite and the thing most likely to keep you unblocked.
+const defaultBaseURL = "https://feeds.bloomberg.com"
+
+// DefaultUserAgent identifies the client to Bloomberg.
 const DefaultUserAgent = "bloom/dev (+https://github.com/tamnd/bloomberg-cli)"
 
-// Client talks to bloomberg over HTTP.
-type Client struct {
-	HTTP      *http.Client
-	UserAgent string
-	// Rate is the minimum gap between requests. Zero means no pacing.
-	Rate    time.Duration
-	Retries int
+// ErrUnknownSection is returned when the caller requests a section slug that
+// is not in the registry.
+var ErrUnknownSection = errors.New("unknown section")
 
-	last time.Time
+// sectionEntry maps a slug to a display name and feed path.
+type sectionEntry struct {
+	Slug string
+	Name string
+	Path string
 }
 
-// NewClient returns a Client with sensible defaults: a 30s timeout, a 200ms
-// minimum gap between requests, and five retries on transient errors.
-func NewClient() *Client {
-	return &Client{
-		HTTP:      &http.Client{Timeout: 30 * time.Second},
+// sectionRegistry is the ordered list of Bloomberg RSS feed sections.
+var sectionRegistry = []sectionEntry{
+	{Slug: "top", Name: "Top Headlines", Path: "/news/headlines.rss"},
+	{Slug: "markets", Name: "Markets", Path: "/markets/news.rss"},
+	{Slug: "technology", Name: "Technology", Path: "/technology/news.rss"},
+	{Slug: "politics", Name: "Politics", Path: "/politics/news.rss"},
+	{Slug: "business", Name: "Business", Path: "/business-week/news.rss"},
+	{Slug: "economics", Name: "Economics", Path: "/economics/news.rss"},
+	{Slug: "personal-finance", Name: "Personal Finance", Path: "/personal-finance/news.rss"},
+	{Slug: "crypto", Name: "Crypto", Path: "/crypto/news.rss"},
+}
+
+// Config holds constructor parameters for Client.
+type Config struct {
+	BaseURL   string
+	UserAgent string
+	Rate      time.Duration
+	Retries   int
+	Timeout   time.Duration
+}
+
+// DefaultConfig returns sensible defaults.
+func DefaultConfig() Config {
+	return Config{
+		BaseURL:   defaultBaseURL,
 		UserAgent: DefaultUserAgent,
-		Rate:      200 * time.Millisecond,
-		Retries:   5,
+		Rate:      500 * time.Millisecond,
+		Retries:   3,
+		Timeout:   30 * time.Second,
 	}
 }
 
-// Get fetches url and returns the response body. It paces and retries according
-// to the client's settings. The caller owns nothing extra; the body is read
-// fully and closed here.
-func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
+// Client talks to Bloomberg RSS feeds over HTTP.
+type Client struct {
+	httpClient *http.Client
+	baseURL    string
+	userAgent  string
+	rate       time.Duration
+	retries    int
+	mu         sync.Mutex
+	last       time.Time
+}
+
+// NewClient returns a Client configured from cfg.
+func NewClient(cfg Config) *Client {
+	base := cfg.BaseURL
+	if base == "" {
+		base = defaultBaseURL
+	}
+	return &Client{
+		httpClient: &http.Client{Timeout: cfg.Timeout},
+		baseURL:    base,
+		userAgent:  cfg.UserAgent,
+		rate:       cfg.Rate,
+		retries:    cfg.Retries,
+	}
+}
+
+// Feed fetches articles from the named section's RSS feed.
+// section is a slug key such as "top", "markets", or "crypto".
+// limit <= 0 returns all items in the feed.
+func (c *Client) Feed(ctx context.Context, section string, limit int) ([]Article, error) {
+	path, err := sectionPath(section)
+	if err != nil {
+		return nil, err
+	}
+	rawURL := c.baseURL + path
+	body, err := c.get(ctx, rawURL)
+	if err != nil {
+		return nil, err
+	}
+	var doc rssDoc
+	if err := xml.Unmarshal(body, &doc); err != nil {
+		return nil, fmt.Errorf("parse rss %s: %w", rawURL, err)
+	}
+	items := doc.Items
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	out := make([]Article, len(items))
+	for i, it := range items {
+		out[i] = itemToArticle(it, i+1)
+	}
+	return out, nil
+}
+
+// Sections returns the ordered static registry of all known feed sections.
+func (c *Client) Sections() []Section {
+	out := make([]Section, len(sectionRegistry))
+	for i, e := range sectionRegistry {
+		out[i] = Section{
+			Rank: i + 1,
+			Name: e.Name,
+			Feed: e.Slug,
+			URL:  c.baseURL + e.Path,
+		}
+	}
+	return out
+}
+
+// sectionPath returns the URL path for slug, or ErrUnknownSection.
+func sectionPath(slug string) (string, error) {
+	for _, e := range sectionRegistry {
+		if e.Slug == slug {
+			return e.Path, nil
+		}
+	}
+	return "", fmt.Errorf("%w: %q", ErrUnknownSection, slug)
+}
+
+// get fetches a URL with pacing and retries.
+func (c *Client) get(ctx context.Context, rawURL string) ([]byte, error) {
 	var lastErr error
-	for attempt := 0; attempt <= c.Retries; attempt++ {
+	for attempt := 0; attempt <= c.retries; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
@@ -54,7 +154,7 @@ func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 			case <-time.After(backoff(attempt)):
 			}
 		}
-		body, retry, err := c.do(ctx, url)
+		body, retry, err := c.do(ctx, rawURL)
 		if err == nil {
 			return body, nil
 		}
@@ -63,18 +163,19 @@ func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 			return nil, err
 		}
 	}
-	return nil, fmt.Errorf("get %s: %w", url, lastErr)
+	return nil, fmt.Errorf("get %s: %w", rawURL, lastErr)
 }
 
-func (c *Client) do(ctx context.Context, url string) (body []byte, retry bool, err error) {
+func (c *Client) do(ctx context.Context, rawURL string) ([]byte, bool, error) {
 	c.pace()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, false, err
 	}
-	req.Header.Set("User-Agent", c.UserAgent)
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("Accept", "application/rss+xml, application/xml, text/xml")
 
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, true, err
 	}
@@ -86,20 +187,20 @@ func (c *Client) do(ctx context.Context, url string) (body []byte, retry bool, e
 	if resp.StatusCode != http.StatusOK {
 		return nil, false, fmt.Errorf("http %d", resp.StatusCode)
 	}
-
-	b, err := io.ReadAll(resp.Body)
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
 		return nil, true, err
 	}
 	return b, false, nil
 }
 
-// pace blocks until at least Rate has passed since the previous request.
 func (c *Client) pace() {
-	if c.Rate <= 0 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.rate <= 0 {
 		return
 	}
-	if wait := c.Rate - time.Since(c.last); wait > 0 {
+	if wait := c.rate - time.Since(c.last); wait > 0 {
 		time.Sleep(wait)
 	}
 	c.last = time.Now()
