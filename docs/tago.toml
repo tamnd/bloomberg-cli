@@ -1,0 +1,10 @@
+title       = "bloom"
+baseURL     = "https://bloomberg-cli.tamnd.com/"
+description = "Read Bloomberg financial news and market updates"
+contentDir  = "content"
+outputDir   = "public"
+theme       = "tago-doks"
+syntaxHighlight = "true"
+
+[params]
+github = "https://github.com/tamnd/bloomberg-cli"
