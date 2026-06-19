@@ -26,23 +26,24 @@ const DefaultUserAgent = "bloom/dev (+https://github.com/tamnd/bloomberg-cli)"
 // is not in the registry.
 var ErrUnknownSection = errors.New("unknown section")
 
-// sectionEntry maps a slug to a display name and feed path.
+// sectionEntry maps a slug to a display name, feed path, and description.
 type sectionEntry struct {
 	Slug string
 	Name string
 	Path string
+	Desc string
 }
 
 // sectionRegistry is the ordered list of Bloomberg RSS feed sections.
 var sectionRegistry = []sectionEntry{
-	{Slug: "top", Name: "Top Headlines", Path: "/news.rss"},
-	{Slug: "markets", Name: "Markets", Path: "/markets/news.rss"},
-	{Slug: "technology", Name: "Technology", Path: "/technology/news.rss"},
-	{Slug: "politics", Name: "Politics", Path: "/politics/news.rss"},
-	{Slug: "business", Name: "Business", Path: "/business/news.rss"},
-	{Slug: "economics", Name: "Economics", Path: "/economics/news.rss"},
-	{Slug: "personal-finance", Name: "Personal Finance", Path: "/wealth/news.rss"},
-	{Slug: "crypto", Name: "Crypto", Path: "/crypto/news.rss"},
+	{Slug: "top", Name: "Top Headlines", Path: "/news.rss", Desc: "Front-page news across all sections"},
+	{Slug: "markets", Name: "Markets", Path: "/markets/news.rss", Desc: "Equities, bonds, currencies, commodities"},
+	{Slug: "technology", Name: "Technology", Path: "/technology/news.rss", Desc: "Tech companies, products, regulation"},
+	{Slug: "politics", Name: "Politics", Path: "/politics/news.rss", Desc: "Government, elections, policy"},
+	{Slug: "business", Name: "Business", Path: "/business/news.rss", Desc: "Corporate news, earnings, M&A"},
+	{Slug: "economics", Name: "Economics", Path: "/economics/news.rss", Desc: "Macro data, central banks, trade"},
+	{Slug: "personal-finance", Name: "Personal Finance", Path: "/wealth/news.rss", Desc: "Investing, retirement, taxes"},
+	{Slug: "crypto", Name: "Crypto", Path: "/crypto/news.rss", Desc: "Cryptocurrencies, digital assets, DeFi"},
 }
 
 // Config holds constructor parameters for Client.
@@ -108,13 +109,13 @@ func (c *Client) Feed(ctx context.Context, section string, limit int) ([]Article
 	if err := xml.Unmarshal(body, &doc); err != nil {
 		return nil, fmt.Errorf("parse rss %s: %w", rawURL, err)
 	}
-	items := doc.Items
+	items := doc.Channel.Items
 	if limit > 0 && len(items) > limit {
 		items = items[:limit]
 	}
 	out := make([]Article, len(items))
 	for i, it := range items {
-		out[i] = itemToArticle(it, i+1)
+		out[i] = itemToArticle(it, i+1, section)
 	}
 	return out, nil
 }
@@ -124,10 +125,11 @@ func (c *Client) Sections() []Section {
 	out := make([]Section, len(sectionRegistry))
 	for i, e := range sectionRegistry {
 		out[i] = Section{
-			Rank: i + 1,
-			Name: e.Name,
-			Feed: e.Slug,
-			URL:  c.baseURL + e.Path,
+			Rank:        i + 1,
+			Slug:        e.Slug,
+			Name:        e.Name,
+			Description: e.Desc,
+			URL:         c.baseURL + e.Path,
 		}
 	}
 	return out
